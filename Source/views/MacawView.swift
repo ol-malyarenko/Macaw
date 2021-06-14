@@ -10,16 +10,208 @@ import AppKit
 /// MacawView is a main class used to embed Macaw scene into your Cocoa UI.
 /// You could create your own view extended from MacawView with predefined scene.
 ///
+
 open class MacawView: MView, MGestureRecognizerDelegate {
+
+    internal var drawingView = DrawingView()
+
+    public lazy var zoom = MacawZoom(view: self)
+
+    open var node: Node {
+        get { return drawingView.node }
+        set { drawingView.node = newValue }
+    }
+
+    open var contentLayout: ContentLayout {
+        get { return drawingView.contentLayout }
+        set { drawingView.contentLayout = newValue }
+    }
+
+    open override var contentMode: MViewContentMode {
+        get { return drawingView.contentMode }
+        set { drawingView.contentMode = newValue }
+    }
+
+    open var place: Transform {
+        get { return drawingView.place }
+    }
+
+    open var placeVar: Variable<Transform> {
+        get { return drawingView.placeVar }
+    }
+
+    override open var frame: CGRect {
+        didSet {
+            super.frame = frame
+            drawingView.frame = frame
+        }
+    }
+
+    override open var intrinsicContentSize: CGSize {
+        get { return drawingView.intrinsicContentSize }
+    }
+
+    internal var renderer: NodeRenderer? {
+        get { return drawingView.renderer }
+        set { drawingView.renderer = newValue }
+    }
+
+    #if os(OSX)
+    open override var layer: CALayer? {
+        didSet {
+            if self.layer == nil {
+                initializeView()
+                renderer = RenderUtils.createNodeRenderer(node, view: drawingView)
+            }
+        }
+    }
+    #endif
+
+    @objc public convenience required init?(coder aDecoder: NSCoder) {
+        self.init(node: Group(), coder: aDecoder)
+    }
+
+    @objc public init?(node: Node, coder aDecoder: NSCoder) {
+        super.init(coder: aDecoder)
+
+        self.node = node
+        self.renderer = RenderUtils.createNodeRenderer(node, view: drawingView)
+
+        zoom.initialize(onChange: { [weak self] transform in
+            self?.onZoomChange(t: transform)
+        })
+        initializeView()
+    }
+
+    public convenience init(node: Node, frame: CGRect) {
+        self.init(frame: frame)
+
+        self.node = node
+        self.renderer = RenderUtils.createNodeRenderer(node, view: drawingView)
+    }
+
+    public override init(frame: CGRect) {
+        super.init(frame: frame)
+
+        zoom.initialize(onChange: { [weak self] transform in
+            self?.onZoomChange(t: transform)
+        })
+        initializeView()
+    }
+
+    public final func findNodeAt(location: CGPoint) -> Node? {
+        return drawingView.findNodeAt(location: location)
+    }
+
+    private func onZoomChange(t: Transform) {
+        if let viewLayer = drawingView.mLayer {
+            viewLayer.transform = CATransform3DMakeAffineTransform(t.toCG())
+        }
+    }
+
+    func initializeView() {
+
+        if !self.subviews.contains(drawingView) {
+            if self.backgroundColor == nil {
+                self.backgroundColor = .white
+            }
+            self.addSubview(drawingView)
+            drawingView.backgroundColor = .clear
+            drawingView.initializeView()
+
+            drawingView.translatesAutoresizingMaskIntoConstraints = false
+            drawingView.trailingAnchor.constraint(equalTo: self.trailingAnchor).isActive = true
+            drawingView.leadingAnchor.constraint(equalTo: self.leadingAnchor).isActive = true
+            drawingView.bottomAnchor.constraint(equalTo: self.bottomAnchor).isActive = true
+            drawingView.topAnchor.constraint(equalTo: self.topAnchor).isActive = true
+
+            #if os(iOS)
+            self.clipsToBounds = true
+            drawingView.isUserInteractionEnabled = false
+            #endif
+        }
+
+        let tapRecognizer = MTapGestureRecognizer(target: drawingView, action: #selector(DrawingView.handleTap(recognizer:)))
+        let longTapRecognizer = MLongPressGestureRecognizer(target: drawingView, action: #selector(DrawingView.handleLongTap(recognizer:)))
+        let panRecognizer = MPanGestureRecognizer(target: drawingView, action: #selector(DrawingView.handlePan))
+        let rotationRecognizer = MRotationGestureRecognizer(target: drawingView, action: #selector(DrawingView.handleRotation))
+        let pinchRecognizer = MPinchGestureRecognizer(target: drawingView, action: #selector(DrawingView.handlePinch))
+
+        tapRecognizer.delegate = self
+        longTapRecognizer.delegate = self
+        panRecognizer.delegate = self
+        rotationRecognizer.delegate = self
+        pinchRecognizer.delegate = self
+
+        tapRecognizer.cancelsTouchesInView = false
+        longTapRecognizer.cancelsTouchesInView = false
+        panRecognizer.cancelsTouchesInView = false
+        rotationRecognizer.cancelsTouchesInView = false
+        pinchRecognizer.cancelsTouchesInView = false
+
+        self.removeGestureRecognizers()
+        self.addGestureRecognizer(tapRecognizer)
+        self.addGestureRecognizer(longTapRecognizer)
+        self.addGestureRecognizer(panRecognizer)
+        self.addGestureRecognizer(rotationRecognizer)
+        self.addGestureRecognizer(pinchRecognizer)
+    }
+
+    open override func mTouchesBegan(_ touches: Set<MTouch>, with event: MEvent?) {
+        super.mTouchesBegan(touches, with: event)
+        zoom.touchesBegan(touches)
+
+        drawingView.touchesBegan(touchPoints: convert(touches: touches))
+    }
+
+    open override func mTouchesMoved(_ touches: Set<MTouch>, with event: MEvent?) {
+        super.mTouchesMoved(touches, with: event)
+        zoom.touchesMoved(touches)
+
+        drawingView.touchesMoved(touchPoints: convert(touches: touches))
+    }
+
+    open override func mTouchesEnded(_ touches: Set<MTouch>, with event: MEvent?) {
+        super.mTouchesEnded(touches, with: event)
+        zoom.touchesEnded(touches)
+
+        drawingView.touchesEnded(touchPoints: convert(touches: touches))
+    }
+
+    override open func mTouchesCancelled(_ touches: Set<MTouch>, with event: MEvent?) {
+        super.mTouchesCancelled(touches, with: event)
+        zoom.touchesEnded(touches)
+
+        drawingView.touchesEnded(touchPoints: convert(touches: touches))
+    }
+
+    private func convert(touches: Set<MTouch>) -> [MTouchEvent] {
+        return touches.map { touch -> MTouchEvent in
+            let location = touch.location(in: self).toMacaw()
+            let id = Int(bitPattern: Unmanaged.passUnretained(touch).toOpaque())
+            return MTouchEvent(x: Double(location.x), y: Double(location.y), id: id)
+        }
+    }
+
+    // MARK: - MGestureRecognizerDelegate
+
+    public func gestureRecognizer(_ gestureRecognizer: MGestureRecognizer, shouldReceive touch: MTouch) -> Bool {
+        return true
+    }
+
+    public func gestureRecognizer(_ gestureRecognizer: MGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: MGestureRecognizer) -> Bool {
+        return true
+    }
+}
+
+internal class DrawingView: MView {
 
     /// Scene root node
     open var node: Node = Group() {
         didSet {
             layoutHelper.nodeChanged()
             self.renderer?.dispose()
-            if let cache = animationCache {
-                self.renderer = RenderUtils.createNodeRenderer(node, view: self, animationCache: cache)
-            }
+            self.renderer = RenderUtils.createNodeRenderer(node, view: self)
 
             if let _ = superview {
                 animationProducer.addStoredAnimations(node, self)
@@ -44,17 +236,13 @@ open class MacawView: MView, MGestureRecognizerDelegate {
         }
     }
 
-    public let zoom = MacawZoom()
-
-    public var place: Transform {
+    var place: Transform {
         return placeManager.placeVar.value
     }
 
-    public var placeVar: Variable<Transform> {
+    var placeVar: Variable<Transform> {
         return placeManager.placeVar
     }
-
-    private let placeManager = RootPlaceManager()
 
     override open var frame: CGRect {
         didSet {
@@ -70,6 +258,14 @@ open class MacawView: MView, MGestureRecognizerDelegate {
         }
     }
 
+    override open var intrinsicContentSize: CGSize {
+        if let bounds = node.bounds {
+            return bounds.size().toCG()
+        } else {
+            return CGSize(width: MNoIntrinsicMetric(), height: MNoIntrinsicMetric())
+        }
+    }
+
     override open func didMoveToSuperview() {
         super.didMoveToSuperview()
 
@@ -80,14 +276,7 @@ open class MacawView: MView, MGestureRecognizerDelegate {
         animationProducer.addStoredAnimations(node, self)
     }
 
-    override open var intrinsicContentSize: CGSize {
-        if let bounds = node.bounds {
-            return bounds.size().toCG()
-        } else {
-            return CGSize(width: MNoIntrinsicMetric(), height: MNoIntrinsicMetric())
-        }
-    }
-
+    private let placeManager = RootPlaceManager()
     private let layoutHelper = LayoutHelper()
 
     var touchesMap = [MTouchEvent: [NodePath]]()
@@ -100,96 +289,17 @@ open class MacawView: MView, MGestureRecognizerDelegate {
     var toRender = true
     var frameSetFirstTime = false
 
-    internal var animationCache: AnimationCache?
-
-    #if os(OSX)
-    open override var layer: CALayer? {
-        didSet {
-            guard self.layer != nil else {
-                return
-            }
-            initializeView()
-
-            if let cache = self.animationCache {
-                self.renderer = RenderUtils.createNodeRenderer(node, view: self, animationCache: cache)
-            }
-        }
+    func initializeView() {
+        self.contentLayout = .none
+        self.context = RenderContext(view: self)
     }
-    #endif
 
-    @objc public init?(node: Node, coder aDecoder: NSCoder) {
+    @objc public required init?(coder aDecoder: NSCoder) {
         super.init(coder: aDecoder)
-        zoom.initialize(view: self, onChange: onZoomChange)
-
-        initializeView()
-
-        self.node = node
-        if let cache = self.animationCache {
-            self.renderer = RenderUtils.createNodeRenderer(node, view: self, animationCache: cache)
-        }
-        backgroundColor = .white
-    }
-
-    public convenience init(node: Node, frame: CGRect) {
-        self.init(frame: frame)
-
-        self.node = node
-        if let cache = self.animationCache {
-            self.renderer = RenderUtils.createNodeRenderer(node, view: self, animationCache: cache)
-        }
-        backgroundColor = .white
     }
 
     public override init(frame: CGRect) {
         super.init(frame: frame)
-        zoom.initialize(view: self, onChange: onZoomChange)
-
-        initializeView()
-    }
-
-    @objc public convenience required init?(coder aDecoder: NSCoder) {
-        self.init(node: Group(), coder: aDecoder)
-    }
-
-    private func onZoomChange(t: Transform) {
-        placeManager.setZoom(place: t)
-        self.setNeedsDisplay()
-    }
-
-    func initializeView() {
-        self.contentLayout = .none
-        self.context = RenderContext(view: self)
-
-        guard let layer = self.mLayer else {
-            return
-        }
-
-        self.animationCache = AnimationCache(sceneLayer: layer)
-
-        let tapRecognizer = MTapGestureRecognizer(target: self, action: #selector(MacawView.handleTap))
-        let longTapRecognizer = MLongPressGestureRecognizer(target: self, action: #selector(MacawView.handleLongTap(recognizer:)))
-        let panRecognizer = MPanGestureRecognizer(target: self, action: #selector(MacawView.handlePan))
-        let rotationRecognizer = MRotationGestureRecognizer(target: self, action: #selector(MacawView.handleRotation))
-        let pinchRecognizer = MPinchGestureRecognizer(target: self, action: #selector(MacawView.handlePinch))
-
-        tapRecognizer.delegate = self
-        longTapRecognizer.delegate = self
-        panRecognizer.delegate = self
-        rotationRecognizer.delegate = self
-        pinchRecognizer.delegate = self
-
-        tapRecognizer.cancelsTouchesInView = false
-        longTapRecognizer.cancelsTouchesInView = false
-        panRecognizer.cancelsTouchesInView = false
-        rotationRecognizer.cancelsTouchesInView = false
-        pinchRecognizer.cancelsTouchesInView = false
-
-        self.removeGestureRecognizers()
-        self.addGestureRecognizer(tapRecognizer)
-        self.addGestureRecognizer(longTapRecognizer)
-        self.addGestureRecognizer(panRecognizer)
-        self.addGestureRecognizer(rotationRecognizer)
-        self.addGestureRecognizer(pinchRecognizer)
     }
 
     open override func layoutSubviews() {
@@ -210,16 +320,16 @@ open class MacawView: MView, MGestureRecognizerDelegate {
         guard let renderer = renderer else {
             return
         }
-        renderer.calculateZPositionRecursively()
 
         // TODO: actually we should track all changes
         placeManager.setLayout(place: layoutHelper.getTransform(renderer, contentLayout, bounds.size.toMacaw()))
-
         ctx.concatenate(self.place.toCG())
+
+        renderer.calculateZPositionRecursively()
         renderer.render(in: ctx, force: false, opacity: node.opacity)
     }
 
-    public final func findNodeAt(location: CGPoint) -> Node? {
+    final func findNodeAt(location: CGPoint) -> Node? {
         guard let ctx = context.cgContext else {
             return .none
         }
@@ -230,14 +340,7 @@ open class MacawView: MView, MGestureRecognizerDelegate {
         guard let renderer = renderer else {
             return .none
         }
-        ctx.saveGState()
-        defer {
-            ctx.restoreGState()
-        }
-        let transform = place.toCG()
-        ctx.concatenate(transform)
-        let loc = location.applying(transform.inverted())
-        return renderer.findNodeAt(parentNodePath: NodePath(node: Node(), location: loc), ctx: ctx)
+        return renderer.findNodeAt(location: location, ctx: ctx)
     }
 
     private func doFindNode(location: CGPoint) -> NodePath? {
@@ -245,20 +348,19 @@ open class MacawView: MView, MGestureRecognizerDelegate {
         defer {
             MGraphicsEndImageContext()
         }
-        guard let ctx = MGraphicsGetCurrentContext() else {
+        guard let ctx = MGraphicsGetCurrentContext(), let inverted = self.place.invert() else {
             return .none
         }
-        return doFindNode(location: location, ctx: ctx)
+        let loc = location.applying(inverted.toCG())
+        return doFindNode(location: loc, ctx: ctx)
     }
 
     // MARK: - Touches
-    override func mTouchesBegan(_ touches: Set<MTouch>, with event: MEvent?) {
-        zoom.touchesBegan(touches)
+    func touchesBegan(touchPoints: [MTouchEvent]) {
 
-        let touchPoints = convert(touches: touches)
         if !self.node.shouldCheckForPressed() &&
             !self.node.shouldCheckForMoved() &&
-            !self.node.shouldCheckForReleased () {
+            !self.node.shouldCheckForReleased() {
             return
         }
 
@@ -277,12 +379,17 @@ open class MacawView: MView, MGestureRecognizerDelegate {
             let inverted = node.place.invert()!
             let loc = location.applying(inverted.toCG())
 
+            var relativeToView = CGPoint.zero
+            if let invertedViewPlace = self.place.invert() {
+                relativeToView = location.applying(invertedViewPlace.toCG())
+            }
+
             let id = Int(bitPattern: Unmanaged.passUnretained(touch).toOpaque())
 
             while let current = nodePath {
                 let node = current.node
                 let relativeLocation = current.location
-                let point = TouchPoint(id: id, location: loc.toMacaw(), relativeLocation: relativeLocation.toMacaw())
+                let point = TouchPoint(id: id, location: loc.toMacaw(), relativeToNodeLocation: relativeLocation.toMacaw(), relativeToViewLocation: relativeToView.toMacaw())
                 let touchEvent = TouchEvent(node: node, points: [point])
 
                 if touchesOfNode[node] == nil {
@@ -298,8 +405,7 @@ open class MacawView: MView, MGestureRecognizerDelegate {
         }
     }
 
-    override func mTouchesMoved(_ touches: Set<MTouch>, with event: MEvent?) {
-        zoom.touchesMoved(touches)
+    func touchesMoved(touchPoints: [MTouchEvent]) {
         if !self.node.shouldCheckForMoved() {
             return
         }
@@ -308,12 +414,12 @@ open class MacawView: MView, MGestureRecognizerDelegate {
             return
         }
 
-        let touchPoints = convert(touches: touches)
         touchesOfNode.keys.forEach { currentNode in
             guard let initialTouches = touchesOfNode[currentNode] else {
                 return
             }
 
+            let invertedViewPlace = self.place.invert()
             var points = [TouchPoint]()
             for initialTouch in initialTouches {
                 guard let currentIndex = touchPoints.firstIndex(of: initialTouch) else {
@@ -326,7 +432,13 @@ open class MacawView: MView, MGestureRecognizerDelegate {
                 let location = CGPoint(x: currentTouch.x, y: currentTouch.y)
                 let inverted = currentNode.place.invert()!
                 let loc = location.applying(inverted.toCG())
-                let point = TouchPoint(id: currentTouch.id, location: loc.toMacaw(), relativeLocation: nodePath.location.toMacaw())
+
+                var relativeToView = CGPoint.zero
+                if let invertedViewPlace = invertedViewPlace {
+                    relativeToView = location.applying(invertedViewPlace.toCG())
+                }
+
+                let point = TouchPoint(id: currentTouch.id, location: loc.toMacaw(), relativeToNodeLocation: nodePath.location.toMacaw(), relativeToViewLocation: relativeToView.toMacaw())
                 points.append(point)
             }
 
@@ -335,29 +447,12 @@ open class MacawView: MView, MGestureRecognizerDelegate {
         }
     }
 
-    override func mTouchesCancelled(_ touches: Set<MTouch>, with event: MEvent?) {
-        touchesEnded(touches: touches)
-    }
-
-    override func mTouchesEnded(_ touches: Set<MTouch>, with event: MEvent?) {
-        touchesEnded(touches: touches)
-    }
-
-    private func convert(touches: Set<MTouch>) -> [MTouchEvent] {
-        return touches.map { touch -> MTouchEvent in
-            let location = touch.location(in: self)
-            let id = Int(bitPattern: Unmanaged.passUnretained(touch).toOpaque())
-            return MTouchEvent(x: Double(location.x), y: Double(location.y), id: id)
-        }
-    }
-
-    private func touchesEnded(touches: Set<MTouch>) {
-        zoom.touchesEnded(touches)
+    func touchesEnded(touchPoints: [MTouchEvent]) {
         guard let _ = renderer else {
             return
         }
 
-        let touchPoints = convert(touches: touches)
+        let invertedViewPlace = self.place.invert()
         for touch in touchPoints {
 
             touchesMap[touch]?.forEach { nodePath in
@@ -366,8 +461,14 @@ open class MacawView: MView, MGestureRecognizerDelegate {
                 let inverted = node.place.invert()!
                 let location = CGPoint(x: touch.x, y: touch.y)
                 let loc = location.applying(inverted.toCG())
+
+                var relativeToView = CGPoint.zero
+                if let invertedViewPlace = invertedViewPlace {
+                    relativeToView = location.applying(invertedViewPlace.toCG())
+                }
+
                 let id = Int(bitPattern: Unmanaged.passUnretained(touch).toOpaque())
-                let point = TouchPoint(id: id, location: loc.toMacaw(), relativeLocation: nodePath.location.toMacaw())
+                let point = TouchPoint(id: id, location: loc.toMacaw(), relativeToNodeLocation: nodePath.location.toMacaw(), relativeToViewLocation: relativeToView.toMacaw())
                 let touchEvent = TouchEvent(node: node, points: [point])
 
                 node.handleTouchReleased(touchEvent)
@@ -570,16 +671,6 @@ open class MacawView: MView, MGestureRecognizerDelegate {
             recognizersMap.removeValue(forKey: recognizer)
         }
     }
-
-    // MARK: - MGestureRecognizerDelegate
-
-    public func gestureRecognizer(_ gestureRecognizer: MGestureRecognizer, shouldReceive touch: MTouch) -> Bool {
-        return true
-    }
-
-    public func gestureRecognizer(_ gestureRecognizer: MGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: MGestureRecognizer) -> Bool {
-        return true
-    }
 }
 
 class LayoutHelper {
@@ -590,8 +681,8 @@ class LayoutHelper {
 
     public func getTransform(_ nodeRenderer: NodeRenderer, _ layout: ContentLayout, _ size: Size) -> Transform {
         setSize(size: size)
-        let node = nodeRenderer.node()
-        var rect = node?.bounds
+        let node = nodeRenderer.node
+        var rect = node.bounds
         if let canvas = node as? SVGCanvas {
             if let view = nodeRenderer.view {
                 rect = canvas.layout(size: view.bounds.size.toMacaw()).rect()
@@ -643,10 +734,8 @@ class LayoutHelper {
     }
 
     private func setSize(size: Size) {
-        if let prevSize = prevSize {
-            if prevSize == size {
-                return
-            }
+        if let prevSize = prevSize, prevSize == size {
+            return
         }
         prevSize = size
         prevRect = nil
