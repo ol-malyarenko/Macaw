@@ -451,23 +451,11 @@ open class SVGParser {
             parentPattern = defPatterns[id]
         }
 
-        var viewBox: Rect = parentPattern?.viewBox ?? .zero()
-        if let viewBoxString = element.allAttributes["viewBox"]?.text {
-            let nums = viewBoxString.components(separatedBy: .whitespaces).map { Double($0) }
-            if nums.count == 4, let x = nums[0], let y = nums[1], let w = nums[2], let h = nums[3] {
-                viewBox = Rect(x: x, y: y, w: w, h: h)
-            }
-        }
-
         let x = getDoubleValue(element, attribute: "x") ?? parentPattern?.bounds.x ?? 0
         let y = getDoubleValue(element, attribute: "y") ?? parentPattern?.bounds.y ?? 0
         let w = getDoubleValue(element, attribute: "width") ?? parentPattern?.bounds.w ?? 0
         let h = getDoubleValue(element, attribute: "height") ?? parentPattern?.bounds.h ?? 0
         let bounds = Rect(x: x, y: y, w: w, h: h)
-
-        guard bounds.w > 0 && bounds.h > 0 else {
-            return .none
-        }
 
         var userSpace = parentPattern?.userSpace ?? false
         if let units = element.allAttributes["patternUnits"]?.text, units == "userSpaceOnUse" {
@@ -478,31 +466,33 @@ open class SVGParser {
             contentUserSpace = false
         }
 
-        let place = getPatternPlace(element)
-
-        var contentNode: Node?
-        if pattern.children.isEmpty {
-            if let parentPattern = parentPattern {
-                contentNode = parentPattern.content
-            }
-        } else if pattern.children.count == 1 {
-            if let shape = try parseNode(pattern.children.first!) as? Shape {
-                contentNode = shape
-            }
-        } else {
-            var shapes = [Shape]()
-            try pattern.children.forEach { indexer in
-                if let shape = try parseNode(indexer) as? Shape {
-                    shapes.append(shape)
+        func parseContentNode() throws -> Node? {
+            if pattern.children.isEmpty {
+                return parentPattern?.content
+            } else if pattern.children.count == 1,
+                let child = pattern.children.first,
+                let shape = try parseNode(child) as? Shape {
+                return shape
+            } else {
+                var shapes = [Shape]()
+                try pattern.children.forEach { indexer in
+                    if let shape = try parseNode(indexer) as? Shape {
+                        shapes.append(shape)
+                    }
                 }
                 return Group(contents: shapes)
             }
         }
 
-        if let contentNode = contentNode {
-            return UserSpacePattern(content: contentNode, bounds: bounds, viewBox: viewBox, userSpace: userSpace, contentUserSpace: contentUserSpace, place: place)
+        guard let contentNode = try parseContentNode() else {
+            print("Pattern does not contain any content.")
+            return .none
         }
-        return .none
+
+        return UserSpacePattern(content: contentNode,
+                                bounds: bounds,
+                                userSpace: userSpace,
+                                contentUserSpace: contentUserSpace)
     }
 
     fileprivate func parseGroup(_ group: XMLIndexer, style: [String: String]) throws -> Group? {
@@ -520,14 +510,7 @@ open class SVGParser {
 
     fileprivate func getPosition(_ element: SWXMLHash.XMLElement) -> Transform {
         guard let transformAttribute = element.allAttributes["transform"]?.text else {
-            return .identity
-        }
-        return parseTransformationAttribute(transformAttribute)
-    }
-
-    fileprivate func getPatternPlace(_ element: SWXMLHash.XMLElement) -> Transform {
-        guard let transformAttribute = element.allAttributes["patternTransform"]?.text else {
-            return .identity
+            return Transform.identity
         }
         return parseTransformationAttribute(transformAttribute)
     }
@@ -777,11 +760,7 @@ open class SVGParser {
             if let pattern = defPatterns[colorId] {
                 return getPatternFill(pattern: pattern, locus: locus)
             }
-            if let fallbackColor = fillColor.split(separator: " ").last {
-                fillColor = String(fallbackColor)
-            }
         }
-
         if fillColor == SVGKeys.currentColor, let currentColor = groupStyle[SVGKeys.color] {
             fillColor = currentColor
         }
@@ -790,16 +769,18 @@ open class SVGParser {
     }
 
     fileprivate func getPatternFill(pattern: UserSpacePattern, locus: Locus?) -> Pattern {
-        if pattern.userSpace == false && pattern.contentUserSpace == true {
-            let tranform = BoundsUtils.transformForLocusInRespectiveCoords(respectiveLocus: pattern.bounds, absoluteLocus: locus!)
-            return Pattern(content: pattern.content, bounds: pattern.bounds.applying(tranform), viewBox: pattern.viewBox, userSpace: true, place: pattern.place)
+        if let locus = locus, pattern.userSpace == false && pattern.contentUserSpace == true {
+            let tranform = BoundsUtils.transformForLocusInRespectiveCoords(respectiveLocus: pattern.bounds,
+                                                                           absoluteLocus: locus)
+            return Pattern(content: pattern.content, bounds: pattern.bounds.applying(tranform), userSpace: true)
         }
-        if pattern.userSpace == true && pattern.contentUserSpace == false {
-            if let patternNode = BoundsUtils.createNodeFromRespectiveCoords(respectiveNode: pattern.content, absoluteLocus: locus!) {
-                return Pattern(content: patternNode, bounds: pattern.bounds, viewBox: pattern.viewBox, userSpace: pattern.userSpace, place: pattern.place)
+        if let locus = locus, pattern.userSpace == true && pattern.contentUserSpace == false {
+            if let patternNode = BoundsUtils.createNodeFromRespectiveCoords(respectiveNode: pattern.content,
+                                                                            absoluteLocus: locus) {
+                return Pattern(content: patternNode, bounds: pattern.bounds, userSpace: pattern.userSpace)
             }
         }
-        return Pattern(content: pattern.content, bounds: pattern.bounds, viewBox: pattern.viewBox, userSpace: true, place: pattern.place)
+        return Pattern(content: pattern.content, bounds: pattern.bounds, userSpace: true)
     }
 
     fileprivate func getStroke(_ styleParts: [String: String], groupStyle: [String: String] = [:]) -> Stroke? {
@@ -1667,7 +1648,7 @@ open class SVGParser {
 
     fileprivate func parseIdFromUrl(_ urlString: String) -> String? {
         if urlString.hasPrefix("url") {
-            return urlString.slice(from: "(#", to: ")")
+            return urlString.substringWithOffset(fromStart: 5, fromEnd: 1)
         }
         return .none
     }
@@ -2185,14 +2166,6 @@ fileprivate extension String {
         let end = index(endIndex, offsetBy: -fromEnd)
         return String(self[start..<end])
     }
-
-    func slice(from: String, to: String) -> String? {
-        return (range(of: from)?.upperBound).flatMap { substringFrom in
-            (range(of: to, range: substringFrom..<endIndex)?.lowerBound).map { substringTo in
-                String(self[substringFrom..<substringTo])
-            }
-        }
-    }
 }
 
 fileprivate class UserSpaceLocus {
@@ -2216,20 +2189,16 @@ fileprivate class UserSpaceNode {
 }
 
 fileprivate class UserSpacePattern {
-    let viewBox: Rect
     let content: Node
     let bounds: Rect
     let userSpace: Bool
     let contentUserSpace: Bool
-    let place: Transform
 
-    init(content: Node, bounds: Rect, viewBox: Rect = Rect(x: 0, y: 0, w: 0, h: 0), userSpace: Bool = false, contentUserSpace: Bool = true, place: Transform = .identity) {
-        self.viewBox = viewBox
+    init(content: Node, bounds: Rect, userSpace: Bool = false, contentUserSpace: Bool = true) {
         self.content = content
         self.bounds = bounds
         self.userSpace = userSpace
         self.contentUserSpace = contentUserSpace
-        self.place = place
     }
 }
 
