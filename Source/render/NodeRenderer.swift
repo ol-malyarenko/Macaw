@@ -268,6 +268,22 @@ class NodeRenderer {
         return img!
     }
 
+    func renderToImage(bounds: Rect, transform: Rect, coloringMode: ColoringMode = .rgb) -> MImage {
+        let screenScale: CGFloat = MMainScreen()?.mScale ?? 1.0
+        MGraphicsBeginImageContextWithOptions(CGSize(width: bounds.w, height: bounds.h), false, screenScale)
+        let tempContext = MGraphicsGetCurrentContext()!
+
+        // flip y-axis and leave space for the blur
+        tempContext.translateBy(x: CGFloat(-transform.x / 2), y: CGFloat(bounds.h + transform.y / 2))
+        tempContext.scaleBy(x: CGFloat(transform.w), y: -CGFloat(transform.h))
+
+        directRender(in: tempContext, force: false, opacity: 1.0, coloringMode: coloringMode)
+
+        let img = MGraphicsGetImageFromCurrentImageContext()
+        MGraphicsEndImageContext()
+        return img!
+    }
+
     func doRender(in context: CGContext, force: Bool, opacity: Double, coloringMode: ColoringMode = .rgb) {
         fatalError("Unsupported")
     }

@@ -148,9 +148,9 @@ open class SVGParser {
                 }
             }
         }
-        let layout = try svgElement.flatMap(parseViewBox)
+        let layout = svgElement != nil ? try parseViewBox(svgElement!) : nil
         try parseSvg(parsedXml.children)
-        let root = layout.flatMap { SVGCanvas(layout: $0, contents: nodes) } ?? Group(contents: nodes)
+        let root = layout != nil ? SVGCanvas(layout: layout!, contents: nodes) : Group(contents: nodes)
         if let opacity = svgElement?.attribute(by: "opacity") {
             root.opacity = getOpacity(opacity.text)
         }
@@ -167,7 +167,9 @@ open class SVGParser {
         if let element = node.element {
             if element.name == "style" {
                 parseStyle(node)
-            } else if element.name == "defs" || element.name == "g" {
+            } else if element.name == "defs" {
+                try prepareDefs(node.children)
+            } else if element.name == "g" {
                 try node.children.forEach { child in
                     try prepareSvg(child)
                 }
@@ -186,6 +188,29 @@ open class SVGParser {
                     defClip[id] = try parseClip(node)
                 default:
                     defNodes[id] = node
+                }
+            }
+        }
+    }
+
+    fileprivate func prepareDefs(_ nodes: [XMLIndexer]) throws {
+        for node in nodes {
+            if let element = node.element {
+                if let id = element.allAttributes["id"]?.text {
+                    switch element.name {
+                    case "linearGradient", "radialGradient", SVGKeys.fill:
+                        defFills[id] = try parseFill(node)
+                    case "pattern":
+                        defPatterns[id] = try parsePattern(node, defs: nodes)
+                    case "mask":
+                        defMasks[id] = try parseMask(node)
+                    case "filter":
+                        defEffects[id] = try parseEffect(node)
+                    case "clip", "clipPath":
+                        defClip[id] = try parseClip(node)
+                    default:
+                        defNodes[id] = node
+                    }
                 }
             }
         }
@@ -439,7 +464,7 @@ open class SVGParser {
         }
     }
 
-    fileprivate func parsePattern(_ pattern: XMLIndexer) throws -> UserSpacePattern? {
+    fileprivate func parsePattern(_ pattern: XMLIndexer, defs: [XMLIndexer]? = nil) throws -> UserSpacePattern? {
         guard let element = pattern.element else {
             return .none
         }
@@ -451,13 +476,25 @@ open class SVGParser {
             parentPattern = defPatterns[id]
         }
 
+        var viewBox: Rect = parentPattern?.viewBox ?? .zero()
+        if let viewBoxString = element.allAttributes["viewBox"]?.text {
+            let nums = viewBoxString.components(separatedBy: .whitespaces).map { Double($0) }
+            if nums.count == 4, let x = nums[0], let y = nums[1], let w = nums[2], let h = nums[3] {
+                viewBox = Rect(x: x, y: y, w: w, h: h)
+            }
+        }
+
         let x = getDoubleValue(element, attribute: "x") ?? parentPattern?.bounds.x ?? 0
         let y = getDoubleValue(element, attribute: "y") ?? parentPattern?.bounds.y ?? 0
         let w = getDoubleValue(element, attribute: "width") ?? parentPattern?.bounds.w ?? 0
         let h = getDoubleValue(element, attribute: "height") ?? parentPattern?.bounds.h ?? 0
         let bounds = Rect(x: x, y: y, w: w, h: h)
 
-        var userSpace = parentPattern?.userSpace ?? false
+        guard bounds.w > 0 && bounds.h > 0 else {
+            return .none
+        }
+
+        var userSpace = parentPattern?.userSpace ?? true
         if let units = element.allAttributes["patternUnits"]?.text, units == "userSpaceOnUse" {
             userSpace = true
         }
@@ -466,33 +503,37 @@ open class SVGParser {
             contentUserSpace = false
         }
 
-        func parseContentNode() throws -> Node? {
-            if pattern.children.isEmpty {
-                return parentPattern?.content
-            } else if pattern.children.count == 1,
-                      let child = pattern.children.first,
-                      let shape = try parseNode(child) as? Shape {
-                return shape
-            } else {
-                var shapes = [Shape]()
-                try pattern.children.forEach { indexer in
-                    if let shape = try parseNode(indexer) as? Shape {
-                        shapes.append(shape)
-                    }
-                }
-                return Group(contents: shapes)
+        let place = getPatternPlace(element)
+
+        var contentNode: Node?
+        if pattern.children.isEmpty {
+            if let parentPattern = parentPattern {
+                contentNode = parentPattern.content
             }
+        } else if pattern.children.count == 1, let child = pattern.children.first {
+            if child.element?.name == "use" {
+                let styles = getStyleAttributes([:], element: child.element!)
+                let position = getPosition(child.element!)
+                let use = try parseUse(child, groupStyle: styles, place: position, defs: defs)
+                contentNode = use
+            } else {
+                let shape = try parseNode(pattern.children.first!) as? Shape
+                contentNode = shape
+            }
+        } else {
+            var shapes = [Shape]()
+            try pattern.children.forEach { indexer in
+                if let shape = try parseNode(indexer) as? Shape {
+                    shapes.append(shape)
+                }
+            }
+            contentNode = Group(contents: shapes)
         }
 
-        guard let contentNode = try parseContentNode() else {
-            print("Pattern does not contain any content.")
-            return .none
+        if let contentNode = contentNode {
+            return UserSpacePattern(content: contentNode, bounds: bounds, viewBox: viewBox, userSpace: userSpace, contentUserSpace: contentUserSpace, place: place)
         }
-
-        return UserSpacePattern(content: contentNode,
-                                bounds: bounds,
-                                userSpace: userSpace,
-                                contentUserSpace: contentUserSpace)
+        return .none
     }
 
     fileprivate func parseGroup(_ group: XMLIndexer, style: [String: String]) throws -> Group? {
@@ -511,6 +552,13 @@ open class SVGParser {
     fileprivate func getPosition(_ element: SWXMLHash.XMLElement) -> Transform {
         guard let transformAttribute = element.allAttributes["transform"]?.text else {
             return Transform.identity
+        }
+        return parseTransformationAttribute(transformAttribute)
+    }
+
+    fileprivate func getPatternPlace(_ element: SWXMLHash.XMLElement) -> Transform {
+        guard let transformAttribute = element.allAttributes["patternTransform"]?.text else {
+            return .identity
         }
         return parseTransformationAttribute(transformAttribute)
     }
@@ -549,14 +597,14 @@ open class SVGParser {
 
         stopParse: while !scanner.isAtEnd {
             guard let attributeName = scanner.scannedCharacters(from: .transformationAttributeCharacters),
-                  scanner.scannedString("(") != nil,
+                  scanner.scanString("(", into: nil),
                   let valuesString = scanner.scannedUpToString(")"),
-                  scanner.scannedString(")") != nil else {
+                  scanner.scanString(")", into: nil) else {
                 break stopParse
             }
 
             // Skip an optional comma after ")".
-            _ = scanner.scannedString(",")
+            _ = scanner.scanString(",", into: nil)
 
             let values = parseTransformValues(valuesString)
             if values.isEmpty {
@@ -659,7 +707,7 @@ open class SVGParser {
             } else {
                 break
             }
-            _ = scanner.scannedString(",")
+            _ = scanner.scanString(",", into: nil)
         }
 
         return collectedValues
@@ -709,11 +757,7 @@ open class SVGParser {
             cleanedHexString = "\(x[0])\(x[0])\(x[1])\(x[1])\(x[2])\(x[2])"
         }
         var rgbValue: UInt32 = 0
-        if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *), let scannedInt = Scanner(string: cleanedHexString).scanUInt64(representation: .hexadecimal) {
-            rgbValue = UInt32(scannedInt)
-        } else {
-            Scanner(string: cleanedHexString).scanHexInt32(&rgbValue)
-        }
+        Scanner(string: cleanedHexString).scanHexInt32(&rgbValue)
 
         let red = CGFloat((rgbValue >> 16) & 0xff)
         let green = CGFloat((rgbValue >> 08) & 0xff)
@@ -758,7 +802,8 @@ open class SVGParser {
                 return fill
             }
             if let pattern = defPatterns[colorId] {
-                return getPatternFill(pattern: pattern, locus: locus)
+                let patternNode = getPatternFill(pattern: pattern, locus: locus)
+                return patternNode
             }
         }
         if fillColor == SVGKeys.currentColor, let currentColor = groupStyle[SVGKeys.color] {
@@ -769,18 +814,18 @@ open class SVGParser {
     }
 
     fileprivate func getPatternFill(pattern: UserSpacePattern, locus: Locus?) -> Pattern {
-        if let locus = locus, pattern.userSpace == false && pattern.contentUserSpace == true {
+        if pattern.userSpace == false && pattern.contentUserSpace == true {
             let tranform = BoundsUtils.transformForLocusInRespectiveCoords(respectiveLocus: pattern.bounds,
-                                                                           absoluteLocus: locus)
-            return Pattern(content: pattern.content, bounds: pattern.bounds.applying(tranform), userSpace: true)
+                                                                           absoluteLocus: locus!)
+            return Pattern(content: pattern.content, bounds: pattern.bounds.applying(tranform), viewBox: pattern.viewBox, userSpace: true, place: pattern.place)
         }
-        if let locus = locus, pattern.userSpace == true && pattern.contentUserSpace == false {
+        if pattern.userSpace == true && pattern.contentUserSpace == false {
             if let patternNode = BoundsUtils.createNodeFromRespectiveCoords(respectiveNode: pattern.content,
-                                                                            absoluteLocus: locus) {
-                return Pattern(content: patternNode, bounds: pattern.bounds, userSpace: pattern.userSpace)
+                                                                            absoluteLocus: locus!) {
+                return Pattern(content: patternNode, bounds: pattern.bounds, viewBox: pattern.viewBox, userSpace: false, place: pattern.place)
             }
         }
-        return Pattern(content: pattern.content, bounds: pattern.bounds, userSpace: true)
+        return Pattern(content: pattern.content, bounds: pattern.bounds, viewBox: pattern.viewBox, userSpace: true, place: pattern.place)
     }
 
     fileprivate func getStroke(_ styleParts: [String: String], groupStyle: [String: String] = [:]) -> Stroke? {
@@ -898,7 +943,7 @@ open class SVGParser {
 
     fileprivate func getTag(_ element: SWXMLHash.XMLElement) -> [String] {
         let id = element.allAttributes["id"]?.text
-        return id.map { [$0] } ?? []
+        return id != nil ? [id!] : []
     }
 
     fileprivate func getOpacity(_ styleParts: [String: String]) -> Double {
@@ -1003,10 +1048,11 @@ open class SVGParser {
 
         let scanner = Scanner(string: pointsString)
         while !scanner.isAtEnd {
-            if let resultPoint = scanner.scannedDouble() {
+            var resultPoint: Double = 0
+            if scanner.scanDouble(&resultPoint) {
                 resultPoints.append(resultPoint)
             }
-            _ = scanner.scannedString(",")
+            _ = scanner.scanCharacters(from: [","], into: nil)
         }
 
         if resultPoints.count % 2 == 1 {
@@ -1208,22 +1254,9 @@ open class SVGParser {
         let text = shouldAddWhitespace ? " \(string)" : string
         let attributes = getStyleAttributes([:], element: element)
 
-        var fillColor: Fill? {
-            guard let fillValue = attributes[SVGKeys.fill] else {
-                return fill
-            }
-
-            if let fillColor = getFillColor(attributes) {
-                return fillColor
-            }
-
-            print("Found invalid fill \(fillValue) in style attributes of \(element.name).")
-            return fill
-        }
-
         return Text(text: text,
                     font: getFont(attributes, fontName: fontName, fontWeight: fontWeight, fontSize: fontSize),
-                    fill: fillColor,
+                    fill: (attributes[SVGKeys.fill] != nil) ? getFillColor(attributes)! : fill,
                     stroke: stroke ?? getStroke(attributes),
                     align: anchorToAlign(textAnchor ?? getTextAnchor(attributes)),
                     baseline: .alphabetic,
@@ -1285,7 +1318,8 @@ open class SVGParser {
 
     fileprivate func parseUse(_ use: XMLIndexer,
                               groupStyle: [String: String] = [:],
-                              place: Transform = .identity) throws -> Node? {
+                              place: Transform = .identity,
+                              defs: [XMLIndexer]? = nil) throws -> Node? {
         guard let element = use.element, let link = element.allAttributes["xlink:href"]?.text else {
             return .none
         }
@@ -1305,6 +1339,27 @@ open class SVGParser {
                     return node
                 }
             }
+        } else if let otherDefs = defs {
+            for def in otherDefs {
+                if let defId = def.element?.allAttributes["id"]?.text, !["linearGradient", "radialGradient", "pattern", "mask", "filter", "clip", "clipMask"].contains(where: { name in
+                    return name == def.element?.name
+                }) {
+                    self.defNodes[defId] = def
+                    if id == defId {
+                        if usedReferenced[id] == nil {
+                            usedReferenced[id] = id
+                            defer {
+                                usedReferenced.removeValue(forKey: id)
+                            }
+                            if let node = try parseNode(def, groupStyle: groupStyle) {
+                                node.place = place.move(dx: getDoubleValue(element, attribute: "x") ?? 0,
+                                                        dy: getDoubleValue(element, attribute: "y") ?? 0).concat(with: node.place)
+                                return node
+                            }
+                        }
+                    }
+                }
+            }
         }
         return .none
     }
@@ -1319,11 +1374,8 @@ open class SVGParser {
             return .none
         }
 
-        if clip.children.count == 1, let child = clip.children.first {
-            guard let shape = try parseNode(child) as? Shape else {
-                return .none
-            }
-
+        if clip.children.count == 1 {
+            let shape = try parseNode(clip.children.first!) as! Shape
             if shape.place != Transform.identity {
                 let locus = TransformedLocus(locus: shape.form, transform: shape.place)
                 return UserSpaceLocus(locus: locus, userSpace: userSpace)
@@ -1348,12 +1400,8 @@ open class SVGParser {
     }
 
     fileprivate func parseMask(_ mask: XMLIndexer) throws -> UserSpaceNode? {
-        guard let element = mask.element else {
-            return .none
-        }
-
         var userSpace = true
-        let styles = getStyleAttributes([:], element: element)
+        let styles = getStyleAttributes([:], element: mask.element!)
         if let units = mask.element?.allAttributes["maskContentUnits"]?.text, units == "objectBoundingBox" {
             userSpace = false
         }
@@ -1362,20 +1410,14 @@ open class SVGParser {
             return .none
         }
 
-        if mask.children.count == 1, let child = mask.children.first {
-            guard let node = try parseNode(child, groupStyle: styles) else {
-                return .none
-            }
-
+        if mask.children.count == 1 {
+            let node = try parseNode(mask.children.first!, groupStyle: styles)!
             return UserSpaceNode(node: node, userSpace: userSpace)
         }
 
-        let nodes = try mask.children.reduce(into: [Node]()) { nodes, indexer in
-            guard let element = indexer.element else {
-                return
-            }
-
-            let position = getPosition(element)
+        var nodes = [Node]()
+        try mask.children.forEach { indexer in
+            let position = getPosition(indexer.element!)
             if let useNode = try parseUse(indexer, groupStyle: styles, place: position) {
                 nodes.append(useNode)
             } else if let contentNode = try parseNode(indexer, groupStyle: styles) {
@@ -1401,6 +1443,7 @@ open class SVGParser {
             }
             effects.removeValue(forKey: filterIn)
 
+            let filterOut = element.allAttributes["result"]?.text
             var resultingEffect: Effect? = .none
 
             switch element.name {
@@ -1415,34 +1458,18 @@ open class SVGParser {
                 }
             case "feColorMatrix":
                 if let type = element.allAttributes["type"]?.text {
-                    func parseMatrix() -> ColorMatrix? {
-                        if type == "saturate" {
-                            guard let value = getDoubleValue(element, attribute: "values") else {
-                                print("Invalid number value in \(element.name)")
-                                return nil
-                            }
-
-                            return ColorMatrix(saturate: value)
-                        } else if type == "hueRotate" {
-                            guard let degrees = getDoubleValue(element, attribute: "values") else {
-                                print("Invalid number value in \(element.name)")
-                                return nil
-                            }
-
-                            return ColorMatrix(hueRotate: degrees / 180 * Double.pi)
-                        } else if type == "luminanceToAlpha" {
-                            return .luminanceToAlpha
-                        } else { // "matrix"
-                            return ColorMatrix(values: getMatrix(element, attribute: "values"))
-                        }
+                    var matrix: ColorMatrix?
+                    if type == "saturate" {
+                        matrix = ColorMatrix(saturate: getDoubleValue(element, attribute: "values")!)
+                    } else if type == "hueRotate" {
+                        let degrees = getDoubleValue(element, attribute: "values")!
+                        matrix = ColorMatrix(hueRotate: degrees / 180 * Double.pi)
+                    } else if type == "luminanceToAlpha" {
+                        matrix = .luminanceToAlpha
+                    } else { // "matrix"
+                        matrix = ColorMatrix(values: getMatrix(element, attribute: "values"))
                     }
-
-                    guard let matrix = parseMatrix() else {
-                        print("Invalid matrix in \(element.name)")
-                        continue
-                    }
-
-                    resultingEffect = ColorMatrixEffect(matrix: matrix, input: currentEffect)
+                    resultingEffect = ColorMatrixEffect(matrix: matrix!, input: currentEffect)
                 }
             case "feBlend":
                 if let filterIn2 = element.allAttributes["in2"]?.text {
@@ -1457,11 +1484,10 @@ open class SVGParser {
                 continue
             }
 
-            guard let filterOut = element.allAttributes["result"]?.text else {
+            if filterOut == nil {
                 return resultingEffect
             }
-
-            effects[filterOut] = resultingEffect
+            effects[filterOut!] = resultingEffect
         }
 
         if effects.count == 1 {
@@ -1907,8 +1933,6 @@ private class PathDataReader {
     private var previous: UnicodeScalar?
     private var iterator: String.UnicodeScalarView.Iterator
 
-    private static let spaces: Set<UnicodeScalar> = Set("\n\r\t ,".unicodeScalars)
-
     init(input: String) {
         self.input = input
         self.iterator = input.unicodeScalars.makeIterator()
@@ -1996,9 +2020,9 @@ private class PathDataReader {
     }
 
     private func skipSpaces() {
-        var currentCharacter = current
-        while let character = currentCharacter, Self.spaces.contains(character) {
-            currentCharacter = readNext()
+        var ch = current
+        while ch != nil && "\n\r\t ,".contains(String(ch!)) {
+            ch = readNext()
         }
     }
 
@@ -2189,16 +2213,20 @@ fileprivate class UserSpaceNode {
 }
 
 fileprivate class UserSpacePattern {
+    let viewBox: Rect
     let content: Node
     let bounds: Rect
     let userSpace: Bool
     let contentUserSpace: Bool
+    let place: Transform
 
-    init(content: Node, bounds: Rect, userSpace: Bool = false, contentUserSpace: Bool = true) {
+    init(content: Node, bounds: Rect, viewBox: Rect = Rect(x: 0, y: 0, w: 0, h: 0), userSpace: Bool = false, contentUserSpace: Bool = true, place: Transform = .identity) {
+        self.viewBox = viewBox
         self.content = content
         self.bounds = bounds
         self.userSpace = userSpace
         self.contentUserSpace = contentUserSpace
+        self.place = place
     }
 }
 
@@ -2246,16 +2274,6 @@ fileprivate extension Scanner {
         } else {
             var string: NSString?
             return scanUpTo(substring, into: &string) ? string as String? : nil
-        }
-    }
-
-    /// A version of `scanString(_:)`, available for an earlier OS.
-    func scannedString(_ searchString: String) -> String? {
-        if #available(OSX 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) {
-            return scanString(searchString)
-        } else {
-            var string: NSString?
-            return scanString(searchString, into: &string) ? string as String? : nil
         }
     }
 }

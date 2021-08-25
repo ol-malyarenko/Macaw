@@ -106,6 +106,9 @@ class ShapeRenderer: NodeRenderer {
         if let stroke = stroke {
             drawWithStroke(stroke, ctx: ctx, opacity: opacity, shouldStrokePath: shouldStrokePath, mode: .stroke)
             return
+        } else {
+            let stroke = Stroke(fill: Color.black, width: 20, cap: .round, join: .miter, miterLimit: 0, dashes: [], offset: 0)
+            drawWithStroke(stroke, ctx: ctx, opacity: opacity, shouldStrokePath: shouldStrokePath, mode: .stroke)
         }
     }
 
@@ -172,9 +175,16 @@ class ShapeRenderer: NodeRenderer {
             let boundsTranform = BoundsUtils.transformForLocusInRespectiveCoords(respectiveLocus: pattern.bounds, absoluteLocus: shape.form)
             patternBounds = pattern.bounds.applying(boundsTranform)
         }
-        let tileImage = renderer.renderToImage(bounds: patternBounds, inset: 0)
+        var viewBox = pattern.viewBox
+        if viewBox == .zero() {
+            viewBox = patternBounds
+        }
+
+        let tileImage = renderer.renderToImage(bounds: viewBox, transform: shape.form.bounds().applying(patternNode.place))
+
+        ctx?.concatenate(pattern.place.toCG())
         ctx?.clip()
-        ctx?.draw(tileImage.cgImage!, in: patternBounds.toCG(), byTiling: true)
+        ctx?.draw(tileImage.cgImage!, in: patternBounds.toCG(), byTiling: false)
     }
 
     fileprivate func drawGradient(_ gradient: Gradient, ctx: CGContext?, opacity: Double) {
