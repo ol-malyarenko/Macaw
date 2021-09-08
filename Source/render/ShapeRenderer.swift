@@ -7,42 +7,42 @@ import AppKit
 #endif
 
 class ShapeRenderer: NodeRenderer {
-
+    
     var shape: Shape
-
+    
     init(shape: Shape, view: DrawingView?, parentRenderer: GroupRenderer? = nil) {
         self.shape = shape
         super.init(node: shape, view: view, parentRenderer: parentRenderer)
     }
-
+    
     deinit {
         dispose()
     }
-
+    
     override var node: Node {
         return shape
     }
-
+    
     override func doAddObservers() {
         super.doAddObservers()
-
+        
         observe(shape.formVar)
         observe(shape.fillVar)
         observe(shape.strokeVar)
     }
-
+    
     override func doRender(in context: CGContext, force: Bool, opacity: Double, coloringMode: ColoringMode = .rgb) {
         if shape.fill == nil && shape.stroke == nil {
             return
         }
-
+        
         RenderUtils.setGeometry(shape.form, ctx: context)
-
+        
         var fillRule = FillRule.nonzero
         if let path = shape.form as? Path {
             fillRule = path.fillRule
         }
-
+        
         switch coloringMode {
         case .rgb:
             drawPath(fill: shape.fill, stroke: shape.stroke, ctx: context, opacity: opacity, fillRule: fillRule)
@@ -52,7 +52,7 @@ class ShapeRenderer: NodeRenderer {
             drawPath(fill: shape.fill?.fillUsingAlphaOnly(), stroke: shape.stroke?.strokeUsingAlphaOnly(), ctx: context, opacity: opacity, fillRule: fillRule)
         }
     }
-
+    
     override func doFindNodeAt(path: NodePath, ctx: CGContext) -> NodePath? {
         RenderUtils.setGeometry(shape.form, ctx: ctx)
         var drawingMode: CGPathDrawingMode?
@@ -66,27 +66,27 @@ class ShapeRenderer: NodeRenderer {
         } else {
             drawingMode = .fill
         }
-
+        
         var contains = false
         if let mode = drawingMode {
             contains = ctx.pathContains(path.location, mode: mode)
-
+            
             if contains {
                 return path
             }
         }
-
+        
         // Prepare for next figure hittesting - clear current context path
         ctx.beginPath()
         return .none
     }
-
+    
     fileprivate func drawPath(fill: Fill?, stroke: Stroke?, ctx: CGContext?, opacity: Double, fillRule: FillRule) {
         var shouldStrokePath = false
         if fill is Gradient || stroke?.fill is Gradient {
             shouldStrokePath = true
         }
-
+        
         if let fill = fill, let stroke = stroke {
             let path = ctx!.path
             setFill(fill, ctx: ctx, opacity: opacity)
@@ -96,13 +96,13 @@ class ShapeRenderer: NodeRenderer {
             drawWithStroke(stroke, ctx: ctx, opacity: opacity, shouldStrokePath: shouldStrokePath, path: path, mode: fillRule == .nonzero ? .fillStroke : .eoFillStroke)
             return
         }
-
+        
         if let fill = fill {
             setFill(fill, ctx: ctx, opacity: opacity)
             ctx!.drawPath(using: fillRule == .nonzero ? .fill : .eoFill)
             return
         }
-
+        
         if let stroke = stroke {
             drawWithStroke(stroke, ctx: ctx, opacity: opacity, shouldStrokePath: shouldStrokePath, mode: .stroke)
             return
@@ -111,7 +111,7 @@ class ShapeRenderer: NodeRenderer {
             drawWithStroke(stroke, ctx: ctx, opacity: opacity, shouldStrokePath: shouldStrokePath, mode: .stroke)
         }
     }
-
+    
     fileprivate func setFill(_ fill: Fill?, ctx: CGContext?, opacity: Double) {
         guard let fill = fill else {
             return
@@ -127,13 +127,13 @@ class ShapeRenderer: NodeRenderer {
             print("Unsupported fill: \(fill)")
         }
     }
-
+    
     fileprivate func drawWithStroke(_ stroke: Stroke, ctx: CGContext?, opacity: Double, shouldStrokePath: Bool = false, path: CGPath? = nil, mode: CGPathDrawingMode) {
         if let path = path, shouldStrokePath {
             ctx!.addPath(path)
         }
         RenderUtils.setStrokeAttributes(stroke, ctx: ctx)
-
+        
         if stroke.fill is Gradient {
             gradientStroke(stroke, ctx: ctx, opacity: opacity)
             return
@@ -146,7 +146,7 @@ class ShapeRenderer: NodeRenderer {
             ctx!.drawPath(using: mode)
         }
     }
-
+    
     fileprivate func colorStroke(_ stroke: Stroke, ctx: CGContext?, opacity: Double) {
         guard let strokeColor = stroke.fill as? Color else {
             return
@@ -154,7 +154,7 @@ class ShapeRenderer: NodeRenderer {
         let color = RenderUtils.applyOpacity(strokeColor, opacity: opacity)
         ctx!.setStrokeColor(color.toCG())
     }
-
+    
     fileprivate func gradientStroke(_ stroke: Stroke, ctx: CGContext?, opacity: Double) {
         guard let gradient = stroke.fill as? Gradient else {
             return
@@ -162,14 +162,14 @@ class ShapeRenderer: NodeRenderer {
         ctx!.replacePathWithStrokedPath()
         drawGradient(gradient, ctx: ctx, opacity: opacity)
     }
-
+    
     fileprivate func drawPattern(_ pattern: Pattern, ctx: CGContext?, opacity: Double) {
         var patternNode = pattern.content
         if !pattern.userSpace, let node = BoundsUtils.createNodeFromRespectiveCoords(respectiveNode: pattern.content, absoluteLocus: shape.form) {
             patternNode = node
         }
         let renderer = RenderUtils.createNodeRenderer(patternNode, view: view)
-
+        
         var patternBounds = pattern.bounds
         if !pattern.userSpace {
             let boundsTranform = BoundsUtils.transformForLocusInRespectiveCoords(respectiveLocus: pattern.bounds, absoluteLocus: shape.form)
@@ -179,14 +179,15 @@ class ShapeRenderer: NodeRenderer {
         if viewBox == .zero() {
             viewBox = patternBounds
         }
-
-        let tileImage = renderer.renderToImage(bounds: viewBox, transform: shape.form.bounds().applying(patternNode.place))
-
-        ctx?.concatenate(pattern.place.toCG())
+        
+        let tRect = shape.form.bounds().applying(patternNode.place)
+        let rotation = atan2(shape.place.m12, shape.place.m11) * 180.0 / Double.pi
+        let tileImage = renderer.renderToImage(bounds: viewBox, transform: tRect, rotation: rotation)
+        
         ctx?.clip()
-        ctx?.draw(tileImage.cgImage!, in: patternBounds.toCG(), byTiling: false)
+        ctx?.draw(tileImage.cgImage!, in: viewBox.toCG(), byTiling: false)
     }
-
+    
     fileprivate func drawGradient(_ gradient: Gradient, ctx: CGContext?, opacity: Double) {
         ctx!.saveGState()
         var colors: [CGColor] = []
@@ -196,7 +197,7 @@ class ShapeRenderer: NodeRenderer {
             let color = RenderUtils.applyOpacity(stop.color, opacity: opacity)
             colors.append(color.toCG())
         }
-
+        
         if let gradient = gradient as? LinearGradient {
             var start = CGPoint(x: CGFloat(gradient.x1), y: CGFloat(gradient.y1))
             var end = CGPoint(x: CGFloat(gradient.x2), y: CGFloat(gradient.y2))
@@ -226,7 +227,7 @@ class ShapeRenderer: NodeRenderer {
                 innerCenter = CGPoint(x: innerCenter.x * bounds.width + bounds.minX, y: innerCenter.y * bounds.height + bounds.minY)
                 outerCenter = CGPoint(x: outerCenter.x * bounds.width + bounds.minX, y: outerCenter.y * bounds.height + bounds.minY)
                 radius = min(radius * bounds.width, radius * bounds.height)
-
+                
             }
             ctx!.clip()
             let cgGradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors as CFArray, locations: stops)
@@ -234,7 +235,7 @@ class ShapeRenderer: NodeRenderer {
         }
         ctx!.restoreGState()
     }
-
+    
 }
 
 extension Stroke {
@@ -259,7 +260,7 @@ extension Fill {
         let linear = self as! LinearGradient
         return LinearGradient(x1: linear.x1, y1: linear.y1, x2: linear.x2, y2: linear.y2, userSpace: linear.userSpace, stops: newStops)
     }
-
+    
     func fillUsingGrayscaleNoAlpha() -> Fill {
         if let color = self as? Color {
             return color.toGrayscaleNoAlpha()
@@ -278,7 +279,7 @@ extension Color {
     func colorUsingAlphaOnly() -> Color {
         return Color.black.with(a: Double(a()) / 255.0)
     }
-
+    
     func toGrayscaleNoAlpha() -> Color {
         let grey = Int(0.21 * Double(r()) + 0.72 * Double(g()) + 0.07 * Double(b()))
         return Color.rgb(r: grey, g: grey, b: grey)
