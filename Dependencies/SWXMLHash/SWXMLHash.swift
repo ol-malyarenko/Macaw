@@ -53,7 +53,7 @@ public class SWXMLHashOptions {
 }
 
 /// Simple XML parser
-public class SWXMLHash {
+public class XMLHash {
     let options: SWXMLHashOptions
 
     private init(_ options: SWXMLHashOptions = SWXMLHashOptions()) {
@@ -68,10 +68,10 @@ public class SWXMLHash {
         options to be set
     - returns: an `SWXMLHash` instance
     */
-    class public func config(_ configAction: (SWXMLHashOptions) -> Void) -> SWXMLHash {
+    class public func config(_ configAction: (SWXMLHashOptions) -> Void) -> XMLHash {
         let opts = SWXMLHashOptions()
         configAction(opts)
-        return SWXMLHash(opts)
+        return XMLHash(opts)
     }
 
     /**
@@ -110,7 +110,7 @@ public class SWXMLHash {
     - returns: An XMLIndexer instance that is used to look up elements in the XML
     */
     class public func parse(_ xml: String) -> XMLIndexer {
-        return SWXMLHash().parse(xml)
+        return XMLHash().parse(xml)
     }
 
     /**
@@ -120,7 +120,7 @@ public class SWXMLHash {
     - returns: An XMLIndexer instance that is used to look up elements in the XML
     */
     class public func parse(_ data: Data) -> XMLIndexer {
-        return SWXMLHash().parse(data)
+        return XMLHash().parse(data)
     }
 
     /**
@@ -900,7 +900,7 @@ extension XMLElement: CustomStringConvertible {
 // On macOS, `XMLElement` is defined in Foundation.
 // So, the code referencing `XMLElement` generates above error.
 // Following code allow to using `SWXMLhash.XMLElement` in client codes.
-extension SWXMLHash {
+extension XMLHash {
     public typealias XMLElement = SWXMLHashXMLElement
 }
 
